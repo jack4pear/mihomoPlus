@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,7 @@ type HealthCheck struct {
 	url            string
 	extra          map[string]*extraOption
 	mu             sync.Mutex
+	listeners      map[*healthCheckListener]struct{}
 	proxies        []C.Proxy
 	interval       time.Duration
 	lazy           bool
@@ -62,6 +64,8 @@ func (hc *HealthCheck) process() {
 }
 
 func (hc *HealthCheck) setProxies(proxies []C.Proxy) {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
 	hc.proxies = proxies
 }
 
@@ -121,7 +125,18 @@ func (hc *HealthCheck) touch() {
 }
 
 func (hc *HealthCheck) check() {
-	if len(hc.proxies) == 0 {
+	hc.mu.Lock()
+	proxies := append([]C.Proxy(nil), hc.proxies...)
+	extra := make(map[string]*extraOption, len(hc.extra))
+	for url, opt := range hc.extra {
+		copyOpt := &extraOption{expectedStatus: opt.expectedStatus, filters: make(map[string]struct{})}
+		for filter := range opt.filters {
+			copyOpt.filters[filter] = struct{}{}
+		}
+		extra[url] = copyOpt
+	}
+	hc.mu.Unlock()
+	if len(proxies) == 0 || hc.ctx.Err() != nil {
 		return
 	}
 
@@ -133,12 +148,12 @@ func (hc *HealthCheck) check() {
 
 		// execute default health check
 		option := &extraOption{filters: nil, expectedStatus: hc.expectedStatus}
-		hc.execute(b, hc.url, id, option)
+		hc.execute(b, hc.url, id, option, proxies)
 
 		// execute extra health check
-		if len(hc.extra) != 0 {
-			for url, option := range hc.extra {
-				hc.execute(b, url, id, option)
+		if len(extra) != 0 {
+			for url, option := range extra {
+				hc.execute(b, url, id, option, proxies)
 			}
 		}
 		_ = b.Wait()
@@ -147,7 +162,7 @@ func (hc *HealthCheck) check() {
 	})
 }
 
-func (hc *HealthCheck) execute(b *errgroup.Group, url, uid string, option *extraOption) {
+func (hc *HealthCheck) execute(b *errgroup.Group, url, uid string, option *extraOption, proxies []C.Proxy) {
 	url = strings.TrimSpace(url)
 	if len(url) == 0 {
 		log.Debugln("Health Check has been skipped due to testUrl is empty, {%s}", uid)
@@ -168,7 +183,7 @@ func (hc *HealthCheck) execute(b *errgroup.Group, url, uid string, option *extra
 		}
 	}
 
-	for _, proxy := range hc.proxies {
+	for _, proxy := range proxies {
 		// skip proxies that do not require health check
 		if filterReg != nil {
 			if match, _ := filterReg.MatchString(proxy.Name()); !match {
@@ -181,7 +196,24 @@ func (hc *HealthCheck) execute(b *errgroup.Group, url, uid string, option *extra
 			ctx, cancel := context.WithTimeout(hc.ctx, hc.timeout)
 			defer cancel()
 			log.Debugln("Health Checking, proxy: %s, url: %s, id: {%s}", p.Name(), url, uid)
-			_, _ = p.URLTest(ctx, url, expectedStatus)
+			started := time.Now()
+			var err error
+			var healthy bool
+			if probe, ok := p.(interface {
+				URLTestWithResult(context.Context, string, utils.IntRanges[uint16]) (uint16, bool, error)
+			}); ok {
+				_, healthy, err = probe.URLTestWithResult(ctx, url, expectedStatus)
+			} else {
+				_, err = p.URLTest(ctx, url, expectedStatus)
+				healthy = p.AliveForTestUrl(url)
+			}
+			if err == nil && !healthy {
+				err = errors.New("health check did not match expected status")
+			}
+			finished := time.Now()
+			if hc.ctx.Err() == nil {
+				hc.emit(HealthCheckResult{Proxy: p, URL: url, ExpectedStatus: expectedStatus.String(), Started: started, Finished: finished, Err: err})
+			}
 			log.Debugln("Health Checked, proxy: %s, url: %s, alive: %t, delay: %d ms uid: {%s}", p.Name(), url, p.AliveForTestUrl(url), p.LastDelayForTestUrl(url), uid)
 			return nil
 		})
@@ -190,6 +222,15 @@ func (hc *HealthCheck) execute(b *errgroup.Group, url, uid string, option *extra
 
 func (hc *HealthCheck) close() {
 	hc.ctxCancel()
+	hc.mu.Lock()
+	listeners := hc.listeners
+	hc.listeners = nil
+	hc.mu.Unlock()
+	for listener := range listeners {
+		listener.mu.Lock()
+		listener.fn = nil
+		listener.mu.Unlock()
+	}
 }
 
 func NewHealthCheck(proxies []C.Proxy, url string, timeout uint, interval uint, lazy bool, expectedStatus utils.IntRanges[uint16]) *HealthCheck {

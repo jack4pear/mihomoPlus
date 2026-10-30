@@ -1,0 +1,34 @@
+# Replace these sample SOCKS endpoints with your own proxy nodes.
+mixed-port: 17890
+allow-lan: false
+mode: rule
+log-level: info
+proxies:
+  - name: A
+    type: socks5
+    server: 127.0.0.1
+    port: 18081
+    udp: true
+  - name: B
+    type: socks5
+    server: 127.0.0.1
+    port: 18082
+    udp: true
+proxy-groups:
+  - name: Smart
+    type: fallback
+    proxies: [A, B]
+    url: https://www.gstatic.com/generate_204
+    expected-status: 204
+    interval: 60
+    timeout: 3000
+    lazy: false
+    smart-fallback:
+      enabled: true
+      window: 600
+      failure-threshold: 3
+      cooldown: [1800, 3600, 7200]
+      recover-success: 3
+      reset-after: 3600
+rules:
+  - MATCH,Smart

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/common/callback"
@@ -13,10 +14,17 @@ import (
 	P "github.com/metacubex/mihomo/constant/provider"
 )
 
-type FallbackOption struct{}
+type FallbackOption struct {
+	SmartFallback SmartFallbackOption `group:"smart-fallback,omitempty"`
+}
 
 type Fallback struct {
 	*GroupBase
+	selectionMu    sync.Mutex
+	smart          *smartFallback
+	unsubscribe    []func()
+	closeOnce      sync.Once
+	unavailable    C.Proxy
 	disableUDP     bool
 	testUrl        string
 	selected       string
@@ -89,7 +97,7 @@ func (f *Fallback) MarshalJSON() ([]byte, error) {
 		"all":            all,
 		"testUrl":        f.testUrl,
 		"expectedStatus": f.expectedStatus,
-		"fixed":          f.selected,
+		"fixed":          f.selectedName(),
 		"hidden":         f.Hidden(),
 		"icon":           f.Icon(),
 		"emptyFallback":  f.EmptyFallback().Name(),
@@ -104,6 +112,25 @@ func (f *Fallback) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
 
 func (f *Fallback) findAliveProxy(touch bool) C.Proxy {
 	proxies := f.GetProxies(touch)
+	f.selectionMu.Lock()
+	defer f.selectionMu.Unlock()
+	if f.smart != nil {
+		if len(proxies) == 0 {
+			return f.EmptyFallback()
+		}
+		if len(proxies) == 1 && proxies[0] == f.EmptyFallback() {
+			return proxies[0]
+		}
+		proxy := f.smart.choose(proxies, f.testUrl, f.selected)
+		if proxy == nil {
+			f.selected = ""
+			return f.unavailable
+		}
+		if f.selected != "" && proxy.Name() != f.selected {
+			f.selected = ""
+		}
+		return proxy
+	}
 	for _, proxy := range proxies {
 		if len(f.selected) == 0 {
 			if proxy.AliveForTestUrl(f.testUrl) {
@@ -124,6 +151,10 @@ func (f *Fallback) findAliveProxy(touch bool) C.Proxy {
 }
 
 func (f *Fallback) Set(name string) error {
+	if f.smart != nil {
+		return f.smartSet(name)
+	}
+
 	var p C.Proxy
 	for _, proxy := range f.GetProxies(false) {
 		if proxy.Name() == name {
@@ -136,7 +167,9 @@ func (f *Fallback) Set(name string) error {
 		return errors.New("proxy not exist")
 	}
 
+	f.selectionMu.Lock()
 	f.selected = name
+	f.selectionMu.Unlock()
 	if !p.AliveForTestUrl(f.testUrl) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*time.Duration(5000))
 		defer cancel()
@@ -148,6 +181,12 @@ func (f *Fallback) Set(name string) error {
 }
 
 func (f *Fallback) ForceSet(name string) {
+	if f.smart != nil {
+		_ = f.smartSet(name)
+		return
+	}
+	f.selectionMu.Lock()
+	defer f.selectionMu.Unlock()
 	f.selected = name
 }
 
@@ -160,7 +199,7 @@ func (f *Fallback) Proxies() []C.Proxy {
 }
 
 func NewFallback(option GroupCommonOption, fallbackOption FallbackOption, emptyFallback C.Proxy, providers []P.ProxyProvider) (*Fallback, error) {
-	return &Fallback{
+	f := &Fallback{
 		GroupBase: NewGroupBase(GroupBaseOption{
 			Name:           option.Name,
 			Type:           C.Fallback,
@@ -177,5 +216,11 @@ func NewFallback(option GroupCommonOption, fallbackOption FallbackOption, emptyF
 		disableUDP:     option.DisableUDP,
 		testUrl:        option.URL,
 		expectedStatus: option.ExpectedStatus,
-	}, nil
+	}
+	if fallbackOption.SmartFallback.Enabled {
+		if err := f.initSmart(option, fallbackOption.SmartFallback); err != nil {
+			return nil, err
+		}
+	}
+	return f, nil
 }

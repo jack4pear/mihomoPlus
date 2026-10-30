@@ -163,8 +163,14 @@ func (p *Proxy) MarshalJSON() ([]byte, error) {
 
 // URLTest get the delay for the specified URL
 // implements C.Proxy
-func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (t uint16, err error) {
-	var satisfied bool
+func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (uint16, error) {
+	delay, _, err := p.URLTestWithResult(ctx, url, expectedStatus)
+	return delay, err
+}
+
+// URLTestWithResult returns this probe's status match without reading mutable history.
+// URLTest retains its upstream error contract for existing callers.
+func (p *Proxy) URLTestWithResult(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (t uint16, satisfied bool, err error) {
 
 	defer func() {
 		alive := err == nil

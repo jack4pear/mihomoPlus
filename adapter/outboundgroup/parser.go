@@ -200,10 +200,30 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		}
 		return NewSelector(groupOption, opt, emptyFallback, providers)
 	case "fallback":
-		opt := FallbackOption{}
+		if raw, ok := config["smart-fallback"]; ok {
+			values, ok := raw.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("smart-fallback must be a mapping")
+			}
+			allowed := map[string]bool{"enabled": true, "window": true, "failure-threshold": true, "cooldown": true, "recover-success": true, "reset-after": true}
+			for key := range values {
+				if !allowed[key] {
+					return nil, fmt.Errorf("smart-fallback: unsupported option %s", key)
+				}
+			}
+			if err := validateSmartNumbers(values); err != nil {
+				return nil, err
+			}
+		}
+		opt := FallbackOption{SmartFallback: defaultSmartFallbackOption()}
 		err = decoder.Decode(config, &opt)
 		if err != nil {
 			return nil, err
+		}
+		if _, present := config["smart-fallback"]; present {
+			if err := opt.SmartFallback.validate(); err != nil {
+				return nil, err
+			}
 		}
 		return NewFallback(groupOption, opt, emptyFallback, providers)
 	case "load-balance":
