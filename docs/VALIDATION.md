@@ -36,7 +36,7 @@
 使用上游正式版附带的 MetaCubeX Go 1.26.10，工具链归档 SHA256 已校验，通过 mise 调用。
 Linux amd64 使用 GOAMD64=v1；Linux arm64 为交叉编译。两个文件均为静态链接 ELF，带 with_gvisor。
 版本为 v1.19.33-smart.1，详细构建参数见 BUILD-INFO.txt。
-源码快照及校验清单随交付包提供；工作目录保留未提交改动，没有自动提交、发布或部署。
+本记录对应首次本地交付，源码快照及校验清单随当时交付包提供。后续提交与 GitHub CI 结果以仓库历史和 Actions 页面为准。
 
 尚未做 OpenWrt、OpenClash 或 Nikki 实机验收。
 HTTP 健康检查不验证 UDP/QUIC 业务通路；已有会话不自动迁移。
