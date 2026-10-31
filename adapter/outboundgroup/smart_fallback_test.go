@@ -309,3 +309,52 @@ func TestSmartGroupStateIsolation(t *testing.T) {
 		t.Fatal("punishment leaked across groups")
 	}
 }
+
+func TestSmartForceSetEmptyRestoresPriority(t *testing.T) {
+	x := newCircuitFixture()
+	a := &fixedHealthProxy{Proxy: x.proxies[0], healthy: true}
+	b := &fixedHealthProxy{Proxy: x.proxies[1], healthy: true}
+	proxies := []C.Proxy{a, b}
+	hc := provider.NewHealthCheck(proxies, "https://probe", 3000, 60, false, nil)
+	pd, err := provider.NewCompatibleProvider("unfix", proxies, hc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pd.Close()
+	f := &Fallback{
+		GroupBase: NewGroupBase(GroupBaseOption{
+			Name: "unfix", Type: C.Fallback, Providers: []P.ProxyProvider{pd},
+			EmptyFallback: x.proxies[0],
+		}),
+		smart: x.s, testUrl: "https://probe",
+	}
+	if got := f.Now(); got != "A" {
+		t.Fatalf("initial selection: got %q, want A", got)
+	}
+	if err := f.Set("B"); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Now(); got != "B" {
+		t.Fatalf("pinned selection: got %q, want B", got)
+	}
+
+	// Non-empty forced selections must still pass smart eligibility checks.
+	a.healthy = false
+	f.ForceSet("A")
+	if got := f.selectedName(); got != "B" {
+		t.Fatalf("ineligible selection changed fixed node: %q", got)
+	}
+	f.ForceSet("missing")
+	if got := f.selectedName(); got != "B" {
+		t.Fatalf("unknown selection changed fixed node: %q", got)
+	}
+	a.healthy = true
+
+	f.ForceSet("")
+	if got := f.selectedName(); got != "" {
+		t.Fatalf("unfix retained fixed node: %q", got)
+	}
+	if got := f.Now(); got != "A" {
+		t.Fatalf("unfix did not restore priority: got %q, want A", got)
+	}
+}

@@ -181,7 +181,7 @@ func (f *Fallback) Set(name string) error {
 }
 
 func (f *Fallback) ForceSet(name string) {
-	if f.smart != nil {
+	if f.smart != nil && name != "" {
 		_ = f.smartSet(name)
 		return
 	}
